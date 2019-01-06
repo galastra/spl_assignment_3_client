@@ -4,24 +4,18 @@
 #include "../include/Task.h"
 #include "../include/ConnectionHandler.h"
 #include "boost/algorithm/string.hpp"
-
 //Papa Task
-bool Task::should_terminate = false;
-std::condition_variable Task::cv;
-Task::Task(int id, std::mutex &mutex,ConnectionHandler &connectionHandler) : _id(id), _mutex(mutex), _connectionHandler(connectionHandler){
-    Task::should_terminate = false;
-    //Task::messages.clear();
+bool Task::sent_LOGOUT = false;
+bool Task::recv_ACK4LOGOUT = false;
+Task::Task(int id, std::mutex &mutex,std::condition_variable &cv,ConnectionHandler &connectionHandler) : _id(id), _mutex(mutex),_cv(cv), _connectionHandler(connectionHandler){
+    Task::sent_LOGOUT = false;
+	recv_ACK4LOGOUT = false;
 }
 void Task::run() {
-    while(!Task::should_terminate) {
+    while(!Task::sent_LOGOUT && !Task::recv_ACK4LOGOUT) {
 		getMsg();
 		sendMsg();
 	}
-    terminate();
-}
-
-Task::~Task() {
-    _connectionHandler.close();
 }
 
 void Task::shortToBytes(short num, char *bytesArr) {
@@ -36,17 +30,9 @@ short Task::bytesTOShort(char *bytesArr) {
 }
 
 int Task::addBytesToVec(std::string str, std::vector<char> &charVec) {
-	try {
-		char charArr[1024];
-		strncpy(charArr, str.c_str(), str.size());
-		charArr[sizeof(charArr) - 1] = 0;
-		for (size_t i = 0; i < str.size(); i++) {
-			char c = charArr[i];
-			if (c == ' ') c = '\0';
-			charVec.push_back(c);
-		}
+	for (size_t i = 0; i < str.size(); i++) {
+		charVec.push_back(str[i]);
 	}
-	catch (...){std::cout<<"error while addBytesToVec\n";}
 	return (int)str.size();
 }
 
@@ -54,8 +40,7 @@ int Task::addBytesToVec(std::string str, std::vector<char> &charVec) {
  * ReadFromstdinTask
  */
 
-ReadFromstdinTask::ReadFromstdinTask(int id, std::mutex &mutex,ConnectionHandler &connectionHandler) : Task(id,mutex,connectionHandler),sizeOfMsg(0){
-	msg2server[1024];
+ReadFromstdinTask::ReadFromstdinTask(int id, std::mutex &mutex,std::condition_variable &cv, ConnectionHandler &connectionHandler) : Task(id,mutex,cv,connectionHandler),sizeOfMsg(0){
 }
 
 bool ReadFromstdinTask::getMsg() {
@@ -63,11 +48,7 @@ bool ReadFromstdinTask::getMsg() {
     const short bufsize = 1024;
     char buf[bufsize];
     //read from stdin
-    std::cout<<"i1\n";
-    //_mutex.lock();
-    std::cin.getline(buf, bufsize); //TODO: understand why this stuck
-    //_mutex.unlock();
-    std::cout<<"i2\n";
+    std::cin.getline(buf, bufsize);
     std::string line(buf);
     std::vector<std::string> cmd;
 
@@ -96,30 +77,31 @@ bool ReadFromstdinTask::getMsg() {
 			set_msg(newMsg);
         }
         if (typeofMessage == "LOGOUT") {
-        	//TODO: should only exit when gets an ACK
             char opcode[2];
             Task::shortToBytes(short(3),opcode);
             std::vector<char> newMsg = {opcode[0],opcode[1]};
-            set_msg(newMsg);
+			set_msg(newMsg);
+			sent_LOGOUT = true;
         }
         if (typeofMessage == "FOLLOW") {
             char opcode[2] ;
 			char followunfollow;
 			char numofusers[2];
-
-
 			Task::shortToBytes(short(4),opcode);
 			followunfollow = char(stoi(cmd[1]));
 			shortToBytes(short(stoi(cmd[2])),numofusers);
 			std::vector<char> newMsg = {opcode[0],opcode[1],followunfollow,numofusers[0],numofusers[1]};
-			addBytesToVec(cmd[3],newMsg);//UserNameList
+			for (int i = 3; i < int(cmd.size()); i++) {
+				addBytesToVec(cmd[i], newMsg);//UserNameList
+				newMsg.push_back('\0');
+			}
 			set_msg(newMsg);
         }
         if (typeofMessage == "POST") {
 			char opcode[2];
 			Task::shortToBytes(short(5),opcode);
 			std::vector<char> newMsg = {opcode[0],opcode[1]};
-			addBytesToVec(cmd[1],newMsg); //content
+			addBytesToVec(line.substr(line.find(' ') + 1), newMsg); //content
 			newMsg.push_back('\0');
 			set_msg(newMsg);
         }
@@ -127,21 +109,19 @@ bool ReadFromstdinTask::getMsg() {
 			char opcode[2];
 			Task::shortToBytes(short(6),opcode);
 			std::vector<char> newMsg = {opcode[0],opcode[1]};
-			addBytesToVec(cmd[1],newMsg); //username
+			addBytesToVec(line = line.substr(line.find(' ') + 1), newMsg); //username
 			newMsg.push_back('\0');
-			addBytesToVec(cmd[2],newMsg); //content
+			addBytesToVec(line.substr(line.find(' ') + 1), newMsg);//content
 			newMsg.push_back('\0');
 			set_msg(newMsg);
         }
         if (typeofMessage == "USERLIST") {
-
 			char opcode[2];
 			Task::shortToBytes(short(7),opcode);
 			std::vector<char> newMsg = {opcode[0],opcode[1]};
 			set_msg(newMsg);
         }
         if (typeofMessage == "STAT") {
-
 			char opcode[2];
 			Task::shortToBytes(short(8),opcode);
 			std::vector<char> newMsg = {opcode[0],opcode[1]};
@@ -152,7 +132,6 @@ bool ReadFromstdinTask::getMsg() {
         return 1;
     }
     catch (...){
-    	std::cerr<<"HAD PROBLEMS READING FROM THE KEYBOARD\n";
         return 0;
     }
 }
@@ -161,109 +140,111 @@ bool ReadFromstdinTask::sendMsg() {
 	if (sizeOfMsg != 0)
 		success = _connectionHandler.sendBytes(msg2server, sizeOfMsg);
 	sizeOfMsg = 0;
-	std::cout<<"TEST\n";
+	if (sent_LOGOUT) {
+		std::unique_lock<std::mutex> lk(_mutex);
+		_cv.wait(lk);
+		sent_LOGOUT = recv_ACK4LOGOUT;
+	}
 	return success;
 }
 
 void ReadFromstdinTask::set_msg(std::vector<char> command) {
     sizeOfMsg = (int)command.size();
-	for (int i = 0; i < command.size(); ++i) {
+	for (int i = 0; i < sizeOfMsg; ++i) {
 		msg2server[i] = command[i];
-		std::cout<<(int)msg2server[i]<<',';
 	}
-	std::cout<<"setMsg worked\n";
 }
 
-void ReadFromstdinTask::terminate() {
-    std::cout<<"terminated\n";
-}
-
-ReadFromstdinTask::~ReadFromstdinTask() {
-    terminate();
-}
 
 
 /**
  * ReadFromSocketTask
  */
-ReadFromSocketTask::ReadFromSocketTask(int id, std::mutex &mutex,ConnectionHandler &connectionHandler) : Task(id,mutex,connectionHandler),opcode(65){}
+ReadFromSocketTask::ReadFromSocketTask(int id, std::mutex &mutex,std::condition_variable &cv, ConnectionHandler &connectionHandler) : Task(id,mutex,cv,connectionHandler),opcode(0){}
 bool ReadFromSocketTask::getMsg() {
-    std::cout<<"trying to get message from socket...\n";
 	char opcode_char[2];
     _connectionHandler.getBytes(opcode_char,2);
     opcode = bytesTOShort(opcode_char);
-	std::cout<<"got a message from the server! opcode: "<<opcode<<'\n';
 	return true;
 }
 bool ReadFromSocketTask::sendMsg() {
-	std::cout << "now processing the message from socket\n";
 	bool s = 1; //true-success false-failure
-	try {
-		//TODO: check how the message is perceived
-		std::string msg_from_server;
-		//std::cout << "now processing the message from socket\n";
-		//check which opcode is the message that was received:
-		switch ((opcode)) {
-			case short(9): {
-				std::cout<<"RECEIVED A NOTIF\n";
-				char notifTyp;
-				std::string postingUser;
-				std::string content;
-				std::string notifTypStr;
-				s *= _connectionHandler.getBytes(&notifTyp, 1);
-				s *= _connectionHandler.getFrameAscii(postingUser, '\0');
-				s *= _connectionHandler.getFrameAscii(content, '\0');
-				switch (notifTyp) {
-					case 0:
-						notifTypStr = "Public";
-						break;
-					case 1:
-						notifTypStr = "PM";
-						break;
-					default:
-						break;
-				}
-				_mutex.lock();
-				std::cout << "NOTIFICATION " << notifTypStr << " " << postingUser << " " << content << '\n';
-				_mutex.unlock();
+	std::string msg_from_server;
+		//check which opcode is the message that was sved:
+	switch ((opcode)) {
+		case short(9): {
+			char notifTyp;
+			std::string postingUser;
+			std::string content;
+			std::string notifTypStr;
+			s *= _connectionHandler.getBytes(&notifTyp, 1);
+			s *= _connectionHandler.getFrameAscii(postingUser, '\0');
+			s *= _connectionHandler.getFrameAscii(content, '\0');
+			switch (notifTyp) {
+				case 0:
+					notifTypStr = "Public";
+					break;
+				case 1:
+					notifTypStr = "PM";
+					break;
+				default:
+					break;
+			}
+			_mutex.lock();
+			std::cout << "NOTIFICATION " << notifTypStr << " " << postingUser << " " << content << '\n';
+			_mutex.unlock();
+			break;
+		}
+		case short(10): {
+			char ack_opcode_arr[2];
+			std::string optional="";
+			//TODO: handle optional properly
+			s *= _connectionHandler.getBytes(ack_opcode_arr, 2);
+				
+			short ack_opcode = bytesTOShort(ack_opcode_arr);
+			switch (ack_opcode) {
+			case 3: //LOGOUT
+				recv_ACK4LOGOUT = true;
+				_cv.notify_all();
+				break;
+			case 7 : //USERLIST
+			case 4 : //FOLLOW
+			{
+				char numOfUsers_arr[2];
+				short numOfUsers;
+				s *= _connectionHandler.getBytes(numOfUsers_arr, 2);
+				numOfUsers = bytesTOShort(numOfUsers_arr);
+				optional += numOfUsers;
+				for (int i=0;i<(int)numOfUsers;i++)
+					s *= _connectionHandler.getFrameAscii(optional, '\0');
+			}
+				break;
+			case 8: //STAT
+			{
+				char numPosts_arr[2];
+				char numFollowers_arr[2];
+				char numFollowing_arr[2];
+				s *= _connectionHandler.getBytes(numPosts_arr, 2);
+				s *= _connectionHandler.getBytes(numFollowers_arr, 2);
+				s *= _connectionHandler.getBytes(numFollowing_arr, 2);
+				optional += bytesTOShort(numPosts_arr) + bytesTOShort(numFollowers_arr) + bytesTOShort(numFollowing_arr);
+			}
 				break;
 			}
-			case short(10): {
-				std::cout<<"RECEIVED AN ACK\n";
-				char msgOpcode[2];
-				std::string optional;
-				//TODO: handle optional properly
-				s *= _connectionHandler.getBytes(msgOpcode, 2);
-				//s *= _connectionHandler.getFrameAscii(optional, '\0');
-				//_mutex.lock();
-				std::cout << "ACK " << bytesTOShort(msgOpcode) << "" << '\n';
-				//_mutex.unlock();
-				break;
+			std::cout << "ACK " << ack_opcode << optional << '\n';
+			break;
+		}
+		case short(11): {
+			char errorOpcode_arr[2];
+			s *= _connectionHandler.getBytes(errorOpcode_arr, 2);
+			short errorOpcode = bytesTOShort(errorOpcode_arr);
+			if (errorOpcode == short(3)) {
+				recv_ACK4LOGOUT = false;
+				_cv.notify_all();
 			}
-			case short(11): {
-				std::cout<<"RECEIVED AN ERROR\n";
-				char errorOpcode[2];
-				s *= _connectionHandler.getBytes(errorOpcode, 2);
-				_mutex.lock();
-				std::cout << "ERROR " << errorOpcode << '\n';
-				_mutex.unlock();
-				break;
-			}
-			default:
-				std::cout << "could not figure out what the message is\n";
-				break;
+			std::cout << "ERROR " << errorOpcode << '\n';
+			break;
 		}
 	}
-	catch (...){
-		std::cout<<"error w/ send msg in taskReadFromSocket\n";
-	}
     return s;
-}
-
-void ReadFromSocketTask::terminate() {
-    Task::should_terminate = true;
-    _connectionHandler.close();
-}
-ReadFromSocketTask::~ReadFromSocketTask() {
-	terminate();
 }

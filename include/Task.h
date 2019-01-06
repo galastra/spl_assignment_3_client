@@ -11,12 +11,11 @@
 
 class Task {
 public:
-	virtual ~Task();
-    Task(int id,std::mutex& mutex,ConnectionHandler &connectionHandler);
+	virtual ~Task() = default;
+    Task(int id,std::mutex& mutex,std::condition_variable& cv, ConnectionHandler &connectionHandler);
     void run();
     virtual bool getMsg()=0;
     virtual bool sendMsg()=0;
-	virtual void terminate()=0;
 	short bytesTOShort(char* bytesArr);
 	void shortToBytes(short num, char* bytesArr);
 	int addBytesToVec(std::string str, std::vector<char>& charVec);
@@ -24,36 +23,33 @@ private:
 	const int _id;
 protected:
 	std::mutex &_mutex;
-	static std::condition_variable cv;
-	static bool should_terminate; //static because the two threads work together
+	std::condition_variable &_cv;
+	static bool sent_LOGOUT; //static because the two threads work together
+	static bool recv_ACK4LOGOUT;
 	ConnectionHandler &_connectionHandler;
-	std::string _host;
-	short _port;
 
 
 };
 
 class ReadFromstdinTask : public Task{
 public:
-	ReadFromstdinTask(int id,std::mutex& mutex,ConnectionHandler &connectionHandler);
-	~ReadFromstdinTask();
+	ReadFromstdinTask(int id,std::mutex& mutex,std::condition_variable &cv, ConnectionHandler &connectionHandler);
+	~ReadFromstdinTask() =default;
     bool getMsg();
     bool sendMsg();
-	void terminate();
 private:
     void set_msg(std::vector<char> command);
     int sizeOfMsg;
-	char msg2server[];
+	char msg2server[1024];
 
 };
 
 class ReadFromSocketTask : public Task{
 public:
-	ReadFromSocketTask(int id,std::mutex& mutex,ConnectionHandler &connectionHandler);
-	~ReadFromSocketTask();
+	ReadFromSocketTask(int id,std::mutex& mutex,std::condition_variable &cv,ConnectionHandler &connectionHandler);
+	~ReadFromSocketTask() = default;
     bool getMsg();
     bool sendMsg();
-	void terminate();
 private:
 	short opcode;
 };
